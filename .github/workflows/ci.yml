@@ -1,0 +1,148 @@
+name: ci
+on:
+  push:
+    branches:
+      - "main"
+      - "test-me/*"
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1" # Run every Monday at 7:00 UTC
+
+concurrency:
+  group: branch-${{ github.head_ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  cache-pixi-lock:
+    uses: ./.github/workflows/cache-pixi-lock.yml
+  unit-test:
+    name: "Unit tests: ${{ matrix.os }} | pixi run -e ${{ matrix.pixi-environment }} tests"
+    runs-on: ${{ matrix.os }}-latest
+    needs: [cache-pixi-lock]
+    env:
+      COVERAGE_REPORT: "${{ matrix.os }}_${{ matrix.pixi-environment }}_unit_test_report.html"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu] #, mac, windows] # TODO v4: Re-enable windows and mac
+        pixi-environment: [test-latest]
+        include:
+          - os: ubuntu
+            pixi-environment: "test-py311"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore cached pixi lockfile
+        uses: actions/cache/restore@v4
+        id: restore-pixi-lock
+        with:
+          path: |
+            pixi.lock
+          key: ${{ needs.cache-pixi-lock.outputs.cache-id }}
+      - uses: prefix-dev/setup-pixi@v0.9.0
+        with:
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'v4-dev' }} # TODO: Update v4-dev to main when v4 is released
+      - name: Unit test
+        run: |
+          pixi run -e ${{ matrix.pixi-environment }} tests -v -s --cov=parcels --cov-report=xml --html="${{ env.COVERAGE_REPORT }}" --self-contained-html
+      - name: Codecov
+        uses: codecov/codecov-action@v5.3.1
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unit-tests
+      - name: Upload test results
+        if: ${{ always() }} # Always run this step, even if tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unittest report ${{ matrix.os }}-${{ matrix.pixi-environment }}
+          path: ${{ env.COVERAGE_REPORT }}
+  integration-test:
+    # TODO v4: Re-enable the workflow once development has stabilized and we want to run integration tests again
+    if: false
+    name: "Integration: ${{ matrix.os }} | pixi run -e ${{ matrix.pixi-environment }} tests-notebooks"
+    runs-on: ${{ matrix.os }}-latest
+    needs: [cache-pixi-lock]
+    env:
+      COVERAGE_REPORT: "${{ matrix.os }}_${{ matrix.pixi-environment }}_integration_test_report.html"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu] #, mac, windows] # TODO v4: Re-enable windows and mac
+        python-version: ["3.12"]
+        include:
+          - os: ubuntu
+            python-version: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore cached pixi lockfile
+        uses: actions/cache/restore@v4
+        id: restore-pixi-lock
+        with:
+          path: |
+            pixi.lock
+          key: ${{ needs.cache-pixi-lock.outputs.cache-id }}
+      - uses: prefix-dev/setup-pixi@v0.9.0
+        with:
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'v4-dev' }} # TODO: Update v4-dev to main when v4 is released
+      - name: Integration test
+        run: |
+          pixi run test-notebooks -v -s --html="${{ env.COVERAGE_REPORT }}" --self-contained-html --cov=parcels --cov-report=xml
+      - name: Codecov
+        uses: codecov/codecov-action@v5.3.1
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: integration-tests
+      - name: Upload test results
+        if: ${{ always() }} # Always run this step, even if tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: Integration test report ${{ matrix.os }}-${{ matrix.pixi-environment }}
+          path: ${{ env.COVERAGE_REPORT }}
+  merge-test-artifacts:
+    runs-on: ubuntu-latest
+    needs:
+      - unit-test
+      - integration-test
+      - typechecking
+    steps:
+      - name: Merge Artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: Testing reports
+          pattern: "* report *"
+  typechecking:
+    name: "TypeChecking: pixi run typing"
+    # TODO v4: Enable typechecking again
+    if: false
+    runs-on: ubuntu-latest
+    needs: [cache-pixi-lock]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Restore cached pixi lockfile
+        uses: actions/cache/restore@v4
+        id: restore-pixi-lock
+        with:
+          path: |
+            pixi.lock
+          key: ${{ needs.cache-pixi-lock.outputs.cache-id }}
+      - uses: prefix-dev/setup-pixi@v0.9.0
+        with:
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'v4-dev' }} # TODO: Update v4-dev to main when v4 is released
+      - name: Typechecking
+        run: |
+          pixi run typing --non-interactive --html-report mypy-report
+      - name: Upload test results
+        if: ${{ always() }} # Upload even on mypy error
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mypy report
+          path: mypy-report
